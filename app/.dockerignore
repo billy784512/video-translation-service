@@ -4,5 +4,6 @@ __pycache__/
 *.log
 *.sqlite3
 .env
+.env.example
 .vscode/
 local.settings.json

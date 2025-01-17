@@ -9,7 +9,7 @@ class AzureBlobManager:
     def __init__(self, connection_string: str):
         self.set_connection_string(connection_string)
 
-    def set_connection_string(self, connection_string: str):
+    def set_connection_string(self, connection_string: str) -> None:
         self.connection_string = connection_string
         self.blob_service_client = BlobServiceClient.from_connection_string(connection_string)
 
@@ -51,7 +51,7 @@ class AzureBlobManager:
             logging.error(f"Failed to download blob: {e}")
             raise
 
-    def download_directory_to_local(self, container_name: str, directory_name: str) -> str:
+    def download_directory_to_local(self, container_name: str, directory_name: str, file_type: str = None) -> str:
         try:
             local_directory = f"/tmp/{directory_name}"
             if not os.path.exists(local_directory):
@@ -67,6 +67,15 @@ class AzureBlobManager:
                 tasks = []
                 for blob in blobs:
                     blob_name = blob.name
+
+                    logging.info(f"find {blob_name} in {directory_name}...")
+
+                    if file_type and not blob_name.endswith(file_type):
+                        logging.info(f"skip {blob_name}...")
+                        continue
+                        
+                    logging.info(f"download {blob_name}...")
+
                     local_file_path = os.path.join(local_directory, os.path.relpath(blob_name, directory_name))
 
                     # Ensure the local directory structure matches the blob directory structure
@@ -85,7 +94,7 @@ class AzureBlobManager:
             logging.error(f"Failed to download directory: {e}")
             raise
 
-    def upload_file(self, container_name:str, blob_name: str, file_path: str):
+    def upload_file(self, container_name:str, blob_name: str, file_path: str) -> None:
         try:
             blob_client = self.blob_service_client.get_blob_client(container=container_name, blob=blob_name)
             with open(file_path, "rb") as data:
@@ -95,12 +104,27 @@ class AzureBlobManager:
             logging.error(f"Failed to upload {file_path}: {e}")
             raise
 
-    def upload_chunks(self, container_name: str, origin_video_name: str, chunked_files: List[str]):
+    def upload_chunks(self, container_name: str, origin_video_name: str, chunked_files: List[str]) -> None:
         self.__upload_chunks(container_name, origin_video_name, chunks = chunked_files)
 
-    def upload_chunk(self, container_name: str, origin_video_name: str, chunk_name: str, chunk_path: str):
+    def upload_chunk(self, container_name: str, origin_video_name: str, chunk_name: str, chunk_path: str) -> None:
         self.__upload_chunks(container_name, origin_video_name, chunk = (chunk_name, chunk_path))
 
+    def list_files_in_folder(self, container_name: str, folder_name: str, file_type: str = None) -> List[str]:
+        container_client = self.blob_service_client.get_container_client(container_name)
+
+        if not folder_name.endswith("/"):
+            folder_name += "/"
+
+        blobs = container_client.list_blob_names(name_starts_with=folder_name)
+        
+        if file_type:
+            result = [blob for blob in blobs if blob.endswith(file_type)]
+        else:
+            result = [blob for blob in blobs]
+
+        return result
+    
     def count_files_in_folder(self, container_name: str, folder_name: str) -> int:
         container_client = self.blob_service_client.get_container_client(container_name)
 
@@ -116,7 +140,7 @@ class AzureBlobManager:
         return blob_client.url
 
 
-    def __upload_chunks(self, container_name: str, origin_video_name: str, chunks: List[str] = None, chunk: tuple = None):
+    def __upload_chunks(self, container_name: str, origin_video_name: str, chunks: List[str] = None, chunk: tuple = None) -> None:
         self.__ensure_container_exists(container_name)
 
         with ThreadPoolExecutor(max_workers=3) as executor:
@@ -131,7 +155,7 @@ class AzureBlobManager:
             for task in tasks:
                 task.result()
 
-    def __ensure_container_exists(self, container_name: str):
+    def __ensure_container_exists(self, container_name: str) -> None:
         try:
             container_client = self.blob_service_client.get_container_client(container_name)
             if not container_client.exists():

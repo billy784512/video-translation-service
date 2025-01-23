@@ -58,7 +58,7 @@ class TranscriptionParser:
          if match and match2:
                original_text = match.group(1)
                original_text_2 = match2.group(1)
-               translated_text = self.translator.translate(self.lang, [InputTextItem(text=original_text_2)])
+               translated_text = self.translator.translate(self.lang, InputTextItem(text=original_text_2))
                block = block.replace(f'"translatedText": "{original_text}"', f'"translatedText": "{translated_text}"')
          processed_blocks.append(block)
 

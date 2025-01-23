@@ -11,10 +11,6 @@ from azure.storage.blob import BlobServiceClient, PublicAccess, generate_contain
 
 class AzureBlobManager:
     def __init__(self, connection_string: str):
-        self.set_connection_string(connection_string)
-
-    def set_connection_string(self, connection_string: str) -> None:
-        self.connection_string = connection_string
         self.blob_service_client = BlobServiceClient.from_connection_string(connection_string)
 
     def download_blob_to_local(self, container_name: str, blob_name: str, num_threads: int = 4) -> str:

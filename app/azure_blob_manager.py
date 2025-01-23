@@ -173,7 +173,7 @@ class AzureBlobManager:
             container_client = self.blob_service_client.get_container_client(container_name)
             if not container_client.exists():
                 logging.info(f"Container '{container_name}' does not exist. Creating it...")
-                container_client.create_container(public_access=PublicAccess.CONTAINER)
+                container_client.create_container()
                 logging.info(f"Container '{container_name}' created successfully.")
             else:
                 logging.info(f"Container '{container_name}' already exists.")

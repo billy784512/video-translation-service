@@ -4,6 +4,8 @@ import json
 import logging
 import requests
 import time
+import copy
+from dotenv import load_dotenv
 
 from azure.functions import HttpRequest, HttpResponse, FunctionApp, EventHubEvent, AuthLevel
 from azure.eventhub import EventHubProducerClient, EventData
@@ -11,10 +13,18 @@ from azure.eventhub import EventHubProducerClient, EventData
 from ffmpeg_utils import split_video, merge_videos_in_directory
 from azure_blob_manager import AzureBlobManager
 from transcription_parser import TranscriptionParser
+from text_translator import TextTranslator
+
+load_dotenv()
 
 app = FunctionApp()
 
+TRANSLATOR_ENDPOINT = os.getenv("TRANSLATOR_ENDPOINT")
+TRANSLATOR_REGION = os.getenv("TRANSLATOR_REGION")
+TRANSLATOR_KEY = os.getenv("TRANSLATOR_KEY")
+
 TRANSLATION_API_KEY = os.getenv("TRANSLATION_API_KEY")
+
 BASE_URL = os.getenv("TRANSLATION_API_URL")
 EVENT_HUB_CONNECTION_STRING = os.getenv("EVENT_HUB_CONNECTION_STRING")
 
@@ -24,104 +34,23 @@ def video_translation(req: HttpRequest) -> HttpResponse:
         body = req.get_json()
         logging.info(f"request with body: {body}")
         
-        blob = body.get("blob", {})
-        lang = body.get("lang", {})
-
-        conn_str = blob.get("conn_str")
-        blob_name = blob.get("blob_name")
-        source_container_name = blob.get("source_container_name")
-        source_lang = lang.get("source")
         mode = body.get("mode", "native")
-
         if mode not in {"native", "enhancement"}:
             return HttpResponse(
                 "The value of mode should be either 'native' or 'enhancement'.",
                 status_code=400
             )
 
-        if mode == "native":
-            target_url = "https://video-translation-poc.bluestone-e5a829ec.eastus.azurecontainerapps.io/api/video-split?"
+        target_url = "https://video-translation-poc.bluestone-e5a829ec.eastus.azurecontainerapps.io/api/video-split?"
 
-            response = requests.post(target_url, json=body)
-            response.raise_for_status()
+        response = requests.post(target_url, json=body)
+        response.raise_for_status()
 
-            if response.status_code == 201:
-                return HttpResponse(
-                    "Video translation sucessfully initiated.",
-                    status_code=201
-                )
-            
-        if mode == "enhancement":
-            target_url = "https://videotranscriptionqa.ambitiousdune-ee7444fd.swedencentral.azurecontainerapps.io/api/transcription?code=7I3kq-0bMvjsuFQK2UVn3puWEhVufglnhx0WBafJ0DJRAzFuVNGiPA%3D%3D"
-
-            req_body = {
-                "video_name": blob_name,
-                "blob_connection_string": conn_str,
-                "input_container_name": source_container_name,
-                "output_container_name": "transcription",
-                "locales": [source_lang]
-            }
-
-            response = requests.post(target_url, json=req_body)
-            response.raise_for_status()
-
-            if response.status_code != 200:
-                return HttpResponse(
-                    f"Transcription return unexpected status code: {response.status_code}",
-                    status_code=400
-                )
-
-            # TODO: 若是 zh-TW, 要多 call 一層 translator 作簡轉繁... (開一個新 class 比較好)
-            logging.info(f"start json to vtt process...")
-        
-            blob_manager = AzureBlobManager(conn_str)
-            tp = TranscriptionParser()
-
-            local_directory = blob_manager.download_directory_to_local("transcription", blob_name, ".json")
-            files = [os.path.join(local_directory, f) for f in sorted(os.listdir(local_directory)) if f.endswith(".json")]
-
-            for idx, path in enumerate(files):
-                new_file_path = os.path.dirname(path) + f"/{idx:02}.vtt"
-                tp.parse_and_save(path, new_file_path)
-                upload_name = f"{blob_name}/{os.path.basename(new_file_path)}"
-                blob_manager.upload_file("transcription", upload_name, new_file_path)
-
-            blob_name_list = blob_manager.list_files_in_folder("chunk", blob_name, ".mp4")
-            transcription_name_list = blob_manager.list_files_in_folder("transcription", blob_name, ".vtt")
-
-            logging.info(f"blob_name_list: {blob_name_list}")
-            logging.info(f"transcription_name_list: {transcription_name_list}")
-
-            if len(blob_name_list) != len(transcription_name_list):
-                logging.info(f"Two list size inconsistent, blob: {blob_name_list}, transcription: {transcription_name_list}")
-                return HttpResponse(
-                    "Two list size inconsistent",
-                    status_code=400
-                )
-
-            producer = get_event_hub_producer("translation")
-            with producer:
-                event_batch = producer.create_batch()
-                idx, n = 0, len(blob_name_list)
-                while idx < n:
-                    message = json.dumps({
-                        "with_subtitle": body.get("with_subtitle"),
-                        "chunk_name": os.path.basename(blob_name_list[idx]),
-                        "chunk_num": n,
-                        "vtt_name": os.path.basename(transcription_name_list[idx]),
-                        "blob": blob,
-                        "lang": lang
-                    })
-                    event_batch.add(EventData(message))
-                    idx += 1
-                    logging.info(f"message: {message}")
-                producer.send_batch(event_batch)
-
+        if response.status_code == 201:
             return HttpResponse(
                 "Video translation sucessfully initiated.",
                 status_code=201
-            )
-            
+            )            
     except requests.RequestException as e:
         logging.error(f"HTTP error: {e}")
         return HttpResponse(
@@ -135,14 +64,12 @@ def video_split(req: HttpRequest) -> HttpResponse:
         body = req.get_json()
 
         blob = body.get("blob", {})
-        lang = body.get("lang", {})
 
         source_container_name = blob.get("source_container_name")
         blob_name = blob.get("blob_name")
         conn_str = blob.get("conn_str")
         chunk_size = body.get("chunk_size", 100)
         pass_to_eventhub = body.get("pass_to_eventhub", False)
-        with_subtitle = body.get("with_subtitle")
 
         if not source_container_name or not blob_name or not conn_str:
             return HttpResponse(
@@ -165,13 +92,12 @@ def video_split(req: HttpRequest) -> HttpResponse:
             with producer:
                 event_batch = producer.create_batch()
                 for idx, chunk_path in enumerate(chunked_files):
-                    message = json.dumps({
-                        "with_subtitle": with_subtitle,
-                        "chunk_name": os.path.basename(chunk_path),
-                        "chunk_num": len(chunked_files),
-                        "blob": blob,
-                        "lang": lang
-                    })
+                    json_data = copy.deepcopy(body)
+                    json_data.pop("pass_to_eventhub")
+                    json_data.pop("chunk_size")
+                    json_data["chunk_num"] = len(chunked_files)
+                    json_data["chunk_name"] = os.path.basename(chunk_path)
+                    message = json.dumps(json_data)
                     event_batch.add(EventData(message))
                 producer.send_batch(event_batch)
 
@@ -203,8 +129,6 @@ def trnslation(azehub: EventHubEvent):
         source_lang = lang.get("source")
         target_lang = lang.get("target")
         chunk_name = event_body.get("chunk_name")
-        chunk_num = event_body.get("chunk_num")
-        vtt_name = event_body.get("vtt_name")
         with_subtitle = True if event_body.get("with_subtitle") == "true" else False
 
         blob_manager = AzureBlobManager(conn_str)
@@ -232,23 +156,16 @@ def trnslation(azehub: EventHubEvent):
         url = f"{BASE_URL}/translations/{translation_id}?api-version=2024-05-20-preview"
 
         response = requests.put(url, headers=req_header, json=req_body)
+        logging.info(f"status code {response.status_code}, text: {response.text}")
         response.raise_for_status()
 
         producer = get_event_hub_producer("transoperationcheck")
         with producer:
             event_batch = producer.create_batch()
-            json_data = {
-                "chunk_name": chunk_name,
-                "chunk_num": chunk_num,
-                "blob": blob,
-                "lang": lang,
-                "operation_id": operation_id,
-                "translation_id": translation_id
-            }
-
-            if vtt_name:
-                json_data["vtt_name"] = vtt_name
-
+            json_data = event_body
+            json_data.pop("with_subtitle")
+            json_data["operation_id"] = operation_id
+            json_data["translation_id"] = translation_id
             message = json.dumps(json_data)
             event_batch.add(EventData(message))
             producer.send_batch(event_batch)
@@ -262,40 +179,39 @@ def trnslation(azehub: EventHubEvent):
 @app.event_hub_message_trigger(arg_name="azehub", event_hub_name="transoperationcheck", connection="EVENT_HUB_CONNECTION_STRING")
 def iteration(azehub: EventHubEvent):
     try:
-        # Decode and log the event body
         event_body = json.loads(azehub.get_body().decode("utf-8"))
 
         logging.info(f"Receive message: {event_body}")
 
         blob = event_body.get("blob", {})
-        lang = event_body.get("lang", {})
 
         operation_id = event_body.get("operation_id", None)
-        vtt_name = event_body.get("vtt_name", "")
+        vtt_name = event_body.get("vtt_name", None)
         conn_str = blob.get("conn_str")
         blob_name = blob.get("blob_name")
 
+        # Come from function translation
         if operation_id:
             res = fetch_translation_status(operation_id)
             while (res.get("status") != "Succeeded"):
                 time.sleep(10)
-                response = requests.get(url, headers=req_header)
-                response.raise_for_status()
+                res = fetch_translation_status(operation_id)
 
         logging.info(f"Create iteration now...")
 
         iteration_id = uuid.uuid4().hex
-        operation_id = uuid.uuid4().hex
+        new_operation_id = uuid.uuid4().hex
         translation_id = event_body.get("translation_id")
         url = f"{BASE_URL}/translations/{translation_id}/iterations/{iteration_id}?api-version=2024-05-20-preview"
 
         req_header = {
             "Ocp-Apim-Subscription-Key": TRANSLATION_API_KEY,
             "Content-Type": "application/json",
-            "Operation-Id": operation_id
+            "Operation-Id": new_operation_id
         }
 
         body = {}
+        # Second iteration
         if vtt_name:
             blob_manager = AzureBlobManager(conn_str)
             vtt_url = blob_manager.get_blob_url("transcription", f"{blob_name}/{vtt_name}")
@@ -319,19 +235,12 @@ def iteration(azehub: EventHubEvent):
 
         with producer:
             event_batch = producer.create_batch()
-            json_data = {
-                "chunk_name": event_body.get("chunk_name"),
-                "chunk_num": event_body.get("chunk_num"),
-                "blob": blob,
-                "lang": lang,
-                "translation_id": translation_id,
-                "iteration_id": iteration_id,
-                "operation_id": operation_id
-            }
+            json_data = event_body
+            json_data["operation_id"] = new_operation_id
+            json_data["iteration_id"] = iteration_id
 
             if vtt_name:
-                json_data["vtt_name"] = vtt_name
-
+                json_data.pop("mode")
             message = json.dumps(json_data)
             event_batch.add(EventData(message))
             producer.send_batch(event_batch)
@@ -341,7 +250,7 @@ def iteration(azehub: EventHubEvent):
         logging.error(f"HTTP request error: {req_err}")
         raise
     except Exception as e:
-        logging.error(f"Unexpected error in 'translation' function: {e}")
+        logging.error(f"Unexpected error in 'iteration' function: {e}")
         raise
 
 @app.function_name(name="iteration-check")
@@ -356,6 +265,8 @@ def iteration_check(azehub: EventHubEvent):
 
         res = fetch_translation_status(operation_id)
         status = res.get("status")
+
+        # Polling job status
         if (status != "Succeeded"):
             if (status == "Failed"):
                 logging.info(f"job failed, oper_id: {operation_id}")
@@ -377,24 +288,66 @@ def iteration_check(azehub: EventHubEvent):
                     message = json.dumps(event_body)
                     event_batch.add(EventData(message))
                     producer.send_batch(event_batch)
+            return
+        
+        blob = event_body.get("blob", {})
+        lang = event_body.get("lang", {})
+
+        translation_id = event_body.get("translation_id")
+        iteration_id = event_body.get("iteration_id")
+        conn_str = blob.get("conn_str")
+        origin_video_name = blob.get("blob_name")
+        chunk_name = event_body.get("chunk_name")
+        chunk_num = event_body.get("chunk_num")
+        mode = event_body.get("mode", "native")
+        target_lang = lang.get("target")
+
+        url = f"{BASE_URL}/translations/{translation_id}/iterations/{iteration_id}?api-version=2024-05-20-preview"
+        req_header = {
+            "Ocp-Apim-Subscription-Key": TRANSLATION_API_KEY
+        }
+
+        response = requests.get(url, headers=req_header)
+
+        if mode == "enhancement":
+            local_file_path = f"/tmp/{uuid.uuid4().hex}.vtt"
+            vtt_name = chunk_name.split(".")[0] + ".vtt"
+            vtt_url = response.json().get("result").get("metadataJsonWebvttFileUrl", "")
+            category_id = event_body.get("category_id", None)
+
+            logging.info(f"response: {response.json()}")
+
+            if not vtt_url:
+                raise ValueError(f"No vtt url, get response {response.json()}")
+
+            response = requests.get(vtt_url, stream=True)
+            response.raise_for_status()
+
+            with open(local_file_path, "w", encoding="utf-8") as file:
+                for line in response.iter_lines(decode_unicode=True):
+                    file.write(line + "\n")
+            
+            tt = TextTranslator(TRANSLATOR_KEY, TRANSLATOR_ENDPOINT, TRANSLATOR_REGION)
+            if category_id:
+                tt.set_category_id(category_id)
+
+            tp = TranscriptionParser(target_lang, tt)
+            tp.easy_parse(local_file_path)
+
+            blob_manager = AzureBlobManager(conn_str)
+            blob_manager.upload_chunk("transcription", origin_video_name, vtt_name, local_file_path)
+
+            producer = get_event_hub_producer("transoperationcheck")
+            with producer:
+                event_body.pop("iteration_id")
+                event_body.pop("operation_id")
+                event_body["vtt_name"] = vtt_name
+                event_batch = producer.create_batch()
+                message = json.dumps(event_body)
+                event_batch.add(EventData(message))
+                producer.send_batch(event_batch)
+
         else:
-            blob = event_body.get("blob", {})
-
-            translation_id = event_body.get("translation_id")
-            iteration_id = event_body.get("iteration_id")
-            conn_str = blob.get("conn_str")
-            origin_video_name = blob.get("blob_name")
-            chunk_name = event_body.get("chunk_name")
-            chunk_num = event_body.get("chunk_num")
-
-
-            url = f"{BASE_URL}/translations/{translation_id}/iterations/{iteration_id}?api-version=2024-05-20-preview"
-            req_header = {
-                "Ocp-Apim-Subscription-Key": TRANSLATION_API_KEY
-            }
-
-            response = requests.get(url, headers=req_header)
-
             local_file_path = f"/tmp/{uuid.uuid4().hex}.mp4"
             raw_video_url = response.json().get("result").get("translatedVideoFileUrl")
 
@@ -420,7 +373,7 @@ def iteration_check(azehub: EventHubEvent):
         logging.error(f"HTTP request error: {req_err}")
         raise
     except Exception as e:
-        logging.error(f"Unexpected error in 'translation' function: {e}")
+        logging.error(f"Unexpected error in 'iteration_check' function: {e}")
         raise
 
 @app.route(route="video-merge", methods=["POST"], auth_level= AuthLevel.ANONYMOUS)
@@ -460,7 +413,7 @@ def video_merge(req: HttpRequest) -> HttpResponse:
             "Execution is failed...",
             status_code=500
         )
-    
+
 def get_event_hub_producer(event_hub_name: str) -> EventHubProducerClient:
     if not EVENT_HUB_CONNECTION_STRING:
         raise ValueError("EVENT_HUB_CONNECTION_STRING is not set")

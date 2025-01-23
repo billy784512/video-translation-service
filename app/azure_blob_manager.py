@@ -1,9 +1,10 @@
 import os
 import logging
+import datetime
 from typing import List
 from concurrent.futures import ThreadPoolExecutor
 
-from azure.storage.blob import BlobServiceClient, PublicAccess
+from azure.storage.blob import BlobServiceClient, PublicAccess, generate_container_sas,ContainerSasPermissions, generate_blob_sas, BlobSasPermissions 
 
 # TODO: optimize code base for reducing code duplication... (low priority)
 # TODO: reduce redundant logging
@@ -140,7 +141,16 @@ class AzureBlobManager:
 
     def get_blob_url(self, container_name: str, blob_name: str) -> str:
         blob_client = self.blob_service_client.get_blob_client(container=container_name, blob=blob_name)
-        return blob_client.url
+        token = generate_container_sas(
+            account_name= self.blob_service_client.account_name,
+            account_key= blob_client.credential.account_key,
+            container_name= container_name,
+            permission= ContainerSasPermissions(read=True, write=True, list=True),
+            expiry= datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=10*365*24),
+            version="2020-02-10"
+        )
+
+        return f"{blob_client.url}?{token}"
 
 
     def __upload_chunks(self, container_name: str, origin_video_name: str, chunks: List[str] = None, chunk: tuple = None) -> None:

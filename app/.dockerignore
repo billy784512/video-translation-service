@@ -1,4 +1,5 @@
 __pycache__/
+venv/
 *.pyc
 *.pyo
 *.log
@@ -6,4 +7,3 @@ __pycache__/
 .env
 .env.example
 .vscode/
-local.settings.json

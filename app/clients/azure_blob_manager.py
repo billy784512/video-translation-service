@@ -4,16 +4,13 @@ import datetime
 from typing import List
 from concurrent.futures import ThreadPoolExecutor
 
-from azure.storage.blob import BlobServiceClient, PublicAccess, generate_container_sas,ContainerSasPermissions, generate_blob_sas, BlobSasPermissions 
-
-# TODO: optimize code base for reducing code duplication... (low priority)
-# TODO: reduce redundant logging
+from azure.storage.blob import BlobServiceClient, generate_blob_sas, BlobSasPermissions
 
 class AzureBlobManager:
     def __init__(self, connection_string: str):
         self.blob_service_client = BlobServiceClient.from_connection_string(connection_string)
-
-    def download_blob_to_local(self, container_name: str, blob_name: str, num_threads: int = 4) -> str:
+    
+    def download_blob_to_local(self, container_name: str, blob_name: str, local_file_path: str, num_threads: int = 4) -> None:
         def download_range(range_start, range_end, thread_idx):
             try:
                 logging.info(f"Thread-{thread_idx} downloading range {range_start}-{range_end}")
@@ -30,13 +27,11 @@ class AzureBlobManager:
             blob_client = self.blob_service_client.get_blob_client(container=container_name, blob=blob_name)
             blob_properties = blob_client.get_blob_properties()
             blob_size = blob_properties.size
-            logging.info(f"Blob size: {blob_size} bytes")
 
             chunk_size = blob_size // num_threads
             ranges = [(i * chunk_size, (i + 1) * chunk_size - 1) for i in range(num_threads)]
             ranges[-1] = (ranges[-1][0], blob_size - 1)
 
-            local_file_path = f"/tmp/{blob_name}"
             with open(local_file_path, "wb") as file:
                 file.truncate(blob_size)
 
@@ -46,16 +41,16 @@ class AzureBlobManager:
                     task.result()
 
             logging.info(f"Blob downloaded to {local_file_path}.")
-            return local_file_path
+            return
         except Exception as e:
             logging.error(f"Failed to download blob: {e}")
             raise
 
-    def download_directory_to_local(self, container_name: str, directory_name: str, file_type: str = None) -> str:
+    def download_directory_to_local(self, container_name: str, directory_name: str, local_directory_path: str, file_type: str = None):
         try:
-            local_directory = f"/tmp/{directory_name}"
-            if not os.path.exists(local_directory):
-                os.makedirs(local_directory)
+            # local_directory = f"/tmp/{directory_name}"
+            # if not os.path.exists(local_directory):
+            #     os.makedirs(local_directory)
 
             if not directory_name.endswith("/"):
                 directory_name += "/"
@@ -67,35 +62,27 @@ class AzureBlobManager:
                 tasks = []
                 for blob in blobs:
                     blob_name = blob.name
-
-                    logging.info(f"find {blob_name} in {directory_name}...")
-
                     if file_type and not blob_name.endswith(file_type):
                         logging.info(f"skip {blob_name}...")
                         continue
                         
                     logging.info(f"download {blob_name}...")
 
-                    local_file_path = os.path.join(local_directory, os.path.relpath(blob_name, directory_name))
+                    local_file_path = os.path.join(local_directory_path, os.path.basename(blob_name))
+                    tasks.append(executor.submit(self.download_blob_to_local, container_name, blob_name, local_file_path, 3))
 
-                    # Ensure the local directory structure matches the blob directory structure
-                    os.makedirs(os.path.dirname(local_file_path), exist_ok=True)
-
-                    # Add download task
-                    tasks.append(executor.submit(self.download_blob_to_local, container_name, blob_name, 3))
-
-                # Wait for all tasks to complete
                 for task in tasks:
                     task.result()
 
             logging.info(f"All blobs in directory '{directory_name}' downloaded to '/tmp/{directory_name}'.")
-            return local_directory
+            return
         except Exception as e:
             logging.error(f"Failed to download directory: {e}")
             raise
 
     def upload_file(self, container_name:str, blob_name: str, file_path: str) -> None:
         try:
+            self.__ensure_container_exists(container_name)
             blob_client = self.blob_service_client.get_blob_client(container=container_name, blob=blob_name)
             with open(file_path, "rb") as data:
                 blob_client.upload_blob(data, blob_type="BlockBlob", overwrite=True, max_concurrency=4)
@@ -104,19 +91,37 @@ class AzureBlobManager:
             logging.error(f"Failed to upload {file_path}: {e}")
             raise
 
-    def upload_chunks(self, container_name: str, origin_video_name: str, chunked_files: List[str]) -> None:
-        self.__upload_chunks(container_name, origin_video_name, chunks = chunked_files)
+    def upload_files(self, container_name: str, dir_name: str, file_paths: List[str] = None) -> None:
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            tasks = []
+            for path in file_paths:
+                blob_name = f"{dir_name}/{os.path.basename(path)}"
+                tasks.append(executor.submit(self.upload_file, container_name, blob_name, path))
 
-    def upload_chunk(self, container_name: str, origin_video_name: str, chunk_name: str, chunk_path: str) -> None:
-        self.__upload_chunks(container_name, origin_video_name, chunk = (chunk_name, chunk_path))
+            for task in tasks:
+                task.result()
 
-    def list_files_in_folder(self, container_name: str, folder_name: str, file_type: str = None) -> List[str]:
+    def get_blob_url(self, container_name: str, blob_name: str) -> str:
+        blob_client = self.blob_service_client.get_blob_client(container=container_name, blob=blob_name)
+        token = generate_blob_sas(
+            account_name= self.blob_service_client.account_name,
+            account_key= blob_client.credential.account_key,
+            container_name= container_name,
+            blob_name= blob_name,
+            permission= BlobSasPermissions(read=True, write=True),
+            expiry= datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=10*365*24),
+            version="2020-02-10"
+        )
+
+        return f"{blob_client.url}?{token}"
+
+    def list_files_in_folder(self, container_name: str, directory_name: str, file_type: str = None) -> List[str]:
         container_client = self.blob_service_client.get_container_client(container_name)
 
-        if not folder_name.endswith("/"):
-            folder_name += "/"
+        if not directory_name.endswith("/"):
+            directory_name += "/"
 
-        blobs = container_client.list_blob_names(name_starts_with=folder_name)
+        blobs = container_client.list_blob_names(name_starts_with=directory_name)
         
         if file_type:
             result = [blob for blob in blobs if blob.endswith(file_type)]
@@ -125,45 +130,6 @@ class AzureBlobManager:
 
         return result
     
-    def count_files_in_folder(self, container_name: str, folder_name: str) -> int:
-        container_client = self.blob_service_client.get_container_client(container_name)
-
-        if not folder_name.endswith("/"):
-            folder_name += "/"
-
-        blobs = container_client.list_blob_names(name_starts_with=folder_name)
-        file_count = sum(1 for _ in blobs)
-        return file_count
-
-    def get_blob_url(self, container_name: str, blob_name: str) -> str:
-        blob_client = self.blob_service_client.get_blob_client(container=container_name, blob=blob_name)
-        token = generate_container_sas(
-            account_name= self.blob_service_client.account_name,
-            account_key= blob_client.credential.account_key,
-            container_name= container_name,
-            permission= ContainerSasPermissions(read=True, write=True, list=True),
-            expiry= datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=10*365*24),
-            version="2020-02-10"
-        )
-
-        return f"{blob_client.url}?{token}"
-
-
-    def __upload_chunks(self, container_name: str, origin_video_name: str, chunks: List[str] = None, chunk: tuple = None) -> None:
-        self.__ensure_container_exists(container_name)
-
-        with ThreadPoolExecutor(max_workers=3) as executor:
-            tasks = []
-            if chunks:
-                for chunk_path in chunks:
-                    blob_name = f"{origin_video_name}/{os.path.basename(chunk_path)}"
-                    tasks.append(executor.submit(self.upload_file, container_name, blob_name, chunk_path))
-            elif chunk:
-                blob_name = f"{origin_video_name}/{chunk[0]}"
-                tasks.append(executor.submit(self.upload_file, container_name, blob_name, chunk[1]))
-            for task in tasks:
-                task.result()
-
     def __ensure_container_exists(self, container_name: str) -> None:
         try:
             container_client = self.blob_service_client.get_container_client(container_name)

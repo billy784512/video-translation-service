@@ -110,13 +110,20 @@ def start_iteration(event_body: Dict) -> None:
     operation_id = event_body.get("operation_id", None)
     vtt_name = event_body.get("vtt_name", None)
     blob_name = event_body.get("blob_name")
+    chunk_name = event_body.get("chunk_name")
 
     try:
-        if operation_id:
+        if not operation_id:
+            raise ValueError("Operation_id is not provided")
+
+        while True:
             res = common.fetch_operation_status(operation_id)
-            while (res.get("status") != "Succeeded"):
-                time.sleep(10)
-                res = common.fetch_operation_status(operation_id)
+            status = res.get("status")
+            logging.info(f"Polling translation ... blob_name: {blob_name}, chunk_name: {chunk_name}, job_status: {status}")
+            if status == "Succeeded":
+                break
+            time.sleep(10)
+
     except Exception as e:
         logging.error(f"Error in video_service, start_iteration, polling phase: {e}")
         raise
@@ -163,17 +170,25 @@ def start_iteration(event_body: Dict) -> None:
         logging.error(f"Error in video_service, start_iteration: {e}")
         raise
 
-def polling_iteration(event_body: Dict):
+def polling_iteration(event_body: Dict) -> bool:
     operation_id = event_body.get("operation_id")
+    origin_video_name = event_body.get("blob_name")
+    chunk_name = event_body.get("chunk_name")
 
     try:
         res = common.fetch_operation_status(operation_id)
         status = res.get("status")
+        logging.info(f"Polling iteration... operation_id: {operation_id}, blob_name: {origin_video_name}, chunk_name: {chunk_name}, job_status: {status}")
         # Polling job status
         if (status != "Succeeded"):
             # Retry
             if (status == "Failed"):
-                logging.info(f"job failed, oper_id: {operation_id}")
+                
+                retry_count = event_body.get("retry_count", 0)
+                if retry_count > config.MAX_RETRY:
+                    raise MaxRetryExceededError(f"Retry attempts exceeded the maximum limit, video_name:{origin_video_name}, chunk_name:{chunk_name}") 
+
+                logging.info(f"job failed, retrying...")
                 producer = common.get_event_hub_producer("transoperationcheck")
 
                 with producer:
@@ -183,9 +198,11 @@ def polling_iteration(event_body: Dict):
                     message = json.dumps(event_body)
                     event_batch.add(EventData(message))
                     producer.send_batch(event_batch)
+
+                raise JobFailedError()
             # Send back to job queue
             else:
-                logging.info(f"job running, oper_id: {operation_id}")
+                logging.info(f"job running, send event back to job queue...")
                 time.sleep(60)
                 producer = common.get_event_hub_producer("iteroperationcheck")
                 with producer:
@@ -193,7 +210,11 @@ def polling_iteration(event_body: Dict):
                     message = json.dumps(event_body)
                     event_batch.add(EventData(message))
                     producer.send_batch(event_batch)
-            return
+            return False
+        logging.info(f"job succeeded, getting result and uploading now...")
+    except JobFailedError as e:
+        logging.error(e)
+        raise
     except Exception as e:
         logging.error(f"Error in video_service, polling_iteration, polling phase: {e}")
         raise
@@ -202,8 +223,6 @@ def polling_iteration(event_body: Dict):
 
     translation_id = event_body.get("translation_id")
     iteration_id = event_body.get("iteration_id")
-    origin_video_name = event_body.get("blob_name")
-    chunk_name = event_body.get("chunk_name")
     mode = event_body.get("mode", "native")
     target_lang = lang.get("target")
 
@@ -230,33 +249,38 @@ def polling_iteration(event_body: Dict):
         if not vtt_url:
             raise ValueError(f"No vtt url, get response {response.json()}")
 
-        response = requests.get(vtt_url, stream=True)
-        response.raise_for_status()
+        try:
+            response = requests.get(vtt_url, stream=True)
+            response.raise_for_status()
 
-        with open(local_file_path, "w", encoding="utf-8") as file:
-            for line in response.iter_lines(decode_unicode=True):
-                file.write(line + "\n")
-        
-        tt = TextTranslator(config.Translator.KEY, config.Translator.ENDPOINT, config.Translator.REGION)
-        if category_id:
-            tt.set_category_id(category_id)
+            with open(local_file_path, "w", encoding="utf-8") as file:
+                for line in response.iter_lines(decode_unicode=True):
+                    file.write(line + "\n")
+            
+            tt = TextTranslator(config.Translator.KEY, config.Translator.ENDPOINT, config.Translator.REGION, category_id)
+            tp = TranscriptionParser(target_lang, tt)
+            tp.easy_parse(local_file_path)
 
-        tp = TranscriptionParser(target_lang, tt)
-        tp.easy_parse(local_file_path)
+            blob_manager = AzureBlobManager(config.BlobStorage.CONN_STR)
+            blob_name = f"{origin_video_name}/{vtt_name}"
+            blob_manager.upload_file("transcription", blob_name, local_file_path)
 
-        blob_manager = AzureBlobManager(config.BlobStorage.CONN_STR)
-        blob_name = f"{origin_video_name}/{vtt_name}"
-        blob_manager.upload_file("transcription", blob_name, local_file_path)
-
-        producer = common.get_event_hub_producer("transoperationcheck")
-        with producer:
-            event_body.pop("iteration_id")
-            event_body.pop("operation_id")
-            event_body["vtt_name"] = vtt_name
-            event_batch = producer.create_batch()
-            message = json.dumps(event_body)
-            event_batch.add(EventData(message))
-            producer.send_batch(event_batch)
+            producer = common.get_event_hub_producer("transoperationcheck")
+            with producer:
+                event_body.pop("iteration_id")
+                event_body.pop("operation_id")
+                event_body["vtt_name"] = vtt_name
+                event_batch = producer.create_batch()
+                message = json.dumps(event_body)
+                event_batch.add(EventData(message))
+                producer.send_batch(event_batch)
+            return False
+        except Exception as e:
+            logging.error(f"Error in video_service, polling_iteration, enhancement mode processing phase: {e}")
+            raise
+        finally:
+            if os.path.exists(local_file_path):
+                os.remove(local_file_path)
     else:
         try:
             tdm = TmpDirManager()
@@ -306,3 +330,19 @@ def merge_video(body: Dict):
             del tdm
         if merged_file_path:
             os.remove(merged_file_path)
+
+
+class JobFailedError(Exception):
+    """
+    Raise this error when job failed but retry again.
+    """
+    default_message = "Job failed but retry now, this error is just a warning. operation_id: {operation_id}, blob_name: {origin_video_name}, chunk_name: {chunk_name}, retry_count: {retry_count}"
+    def __init__(self, operaiotn_id, origin_video_name, chunk_name, retry_count):
+        message = self.default_message.format(operaiotn_id, origin_video_name, chunk_name, retry_count)
+        super().__init__(message)
+
+class MaxRetryExceededError(Exception):
+    """
+    Raise this error when job failed and retry limit is exceeded.
+    """
+    pass

@@ -50,10 +50,6 @@ class AzureBlobManager:
 
     def download_directory_to_local(self, container_name: str, directory_name: str, local_directory_path: str, file_type: str = None):
         try:
-            # local_directory = f"/tmp/{directory_name}"
-            # if not os.path.exists(local_directory):
-            #     os.makedirs(local_directory)
-
             if not directory_name.endswith("/"):
                 directory_name += "/"
 

@@ -22,4 +22,6 @@ class Config:
         SOURCE_CONTAINER = os.getenv("BLOB_STORAGE_SOURCE_CONTAINER")
         TARGET_CONTAINER = os.getenv("BLOB_STORAGE_TARGET_CONTAINER")
 
+    MAX_RETRY = os.getenv("MAX_RETRY")
+
 config = Config()

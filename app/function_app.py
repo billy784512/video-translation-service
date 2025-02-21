@@ -24,7 +24,6 @@ def video_translation(req: HttpRequest) -> HttpResponse:
         
         file_num = video_service.split_video(body)
 
-
         return HttpResponse(
             f"Video translation sucessfully initiated. split into {file_num} jobs",
             status_code=201
@@ -35,28 +34,6 @@ def video_translation(req: HttpRequest) -> HttpResponse:
             f"Execution failed. {e}",
             status_code=500
         )
-    
-
-# @app.route(route="video-split", methods=["POST"], auth_level= AuthLevel.FUNCTION)
-# def video_split(req: HttpRequest) -> HttpResponse:
-#     try:
-#         logging.info("video_split executed")
-#         body = req.get_json()
-#         logging.info(f"request with body: {body}")
-
-#         file_num = video_service.split_video(body)
-
-#         return HttpResponse(
-#             f"Video processed successfully. {file_num} chunks uploaded.",
-#             status_code=201
-#         )
-    
-#     except Exception as e:
-#         logging.error(f"Error processing video: {e}")
-#         return HttpResponse(
-#             "An error occurred while processing the video.",
-#             status_code=500
-#         )
     
 @app.function_name(name="translation")
 @app.event_hub_message_trigger(arg_name="azehub", event_hub_name="translation", connection="EVENT_HUB_CONNECTION_STRING")
@@ -96,8 +73,8 @@ def iteration_check(azehub: EventHubEvent):
         logging.info("iteration-check executed")
         event_body = json.loads(azehub.get_body().decode("utf-8"))
         logging.info(f"Receive message: {event_body}")
-        video_service.polling_iteration(event_body)
-        if event_body.get("mode", "native") == "native":
+        check = video_service.polling_iteration(event_body)
+        if check:
             video_service.merge_video(event_body)
             
     except Exception as e:

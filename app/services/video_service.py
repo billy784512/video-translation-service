@@ -18,38 +18,31 @@ from clients.text_translator import TextTranslator
 
 def split_video(body: Dict) -> int:
 
-    blob = body.get("blob", {})
-
-    source_container_name = blob.get("source_container_name")
-    blob_name = blob.get("blob_name")
-    conn_str = blob.get("conn_str")
+    blob_name = body.get("blob_name")
     chunk_size = body.get("chunk_size", 100)
-    pass_to_eventhub = body.get("pass_to_eventhub", False)
 
     try:
-        blob_manager = AzureBlobManager(conn_str)
+        blob_manager = AzureBlobManager(config.BlobStorage.CONN_STR)
         tdm_1 = TmpDirManager()
         local_file_path = f"{tdm_1.get_folder_name()}/{uuid.uuid4().hex}.mp4"
-        blob_manager.download_blob_to_local(source_container_name, blob_name, local_file_path)
+        blob_manager.download_blob_to_local(config.BlobStorage.SOURCE_CONTAINER, blob_name, local_file_path)
         
         tdm_2 = ffmpeg.split_video(local_file_path, chunk_size)
         split_file_paths = tdm_2.get_files()
 
         blob_manager.upload_files("chunk", blob_name, split_file_paths)
 
-        if pass_to_eventhub:
-            producer = common.get_event_hub_producer("translation")
-            with producer:
-                event_batch = producer.create_batch()
-                for idx, path in enumerate(split_file_paths):
-                    json_data = copy.deepcopy(body)
-                    json_data.pop("pass_to_eventhub")
-                    json_data.pop("chunk_size")
-                    json_data["chunk_num"] = len(split_file_paths)
-                    json_data["chunk_name"] = os.path.basename(path)
-                    message = json.dumps(json_data)
-                    event_batch.add(EventData(message))
-                producer.send_batch(event_batch)
+        producer = common.get_event_hub_producer("translation")
+        with producer:
+            event_batch = producer.create_batch()
+            for idx, path in enumerate(split_file_paths):
+                json_data = copy.deepcopy(body)
+                json_data.pop("chunk_size")
+                json_data["chunk_num"] = len(split_file_paths)
+                json_data["chunk_name"] = os.path.basename(path)
+                message = json.dumps(json_data)
+                event_batch.add(EventData(message))
+            producer.send_batch(event_batch)
 
         return len(split_file_paths)
     except Exception as e:
@@ -61,18 +54,16 @@ def split_video(body: Dict) -> int:
         del tdm_2
 
 def start_translation(event_body: Dict) -> None:
-    blob = event_body.get("blob", {})
     lang = event_body.get("lang", {})
 
-    conn_str = blob.get("conn_str")
-    blob_name = blob.get("blob_name")
+    blob_name = event_body.get("blob_name")
     source_lang = lang.get("source")
     target_lang = lang.get("target")
     chunk_name = event_body.get("chunk_name")
     with_subtitle = True if event_body.get("with_subtitle") == "true" else False
 
     try:
-        blob_manager = AzureBlobManager(conn_str)
+        blob_manager = AzureBlobManager(config.BlobStorage.CONN_STR)
         blob_url = blob_manager.get_blob_url("chunk", f"{blob_name}/{chunk_name}")
 
         operation_id = uuid.uuid4().hex
@@ -116,12 +107,9 @@ def start_translation(event_body: Dict) -> None:
         raise
 
 def start_iteration(event_body: Dict) -> None:
-    blob = event_body.get("blob", {})
-
     operation_id = event_body.get("operation_id", None)
     vtt_name = event_body.get("vtt_name", None)
-    conn_str = blob.get("conn_str")
-    blob_name = blob.get("blob_name")
+    blob_name = event_body.get("blob_name")
 
     try:
         if operation_id:
@@ -147,7 +135,7 @@ def start_iteration(event_body: Dict) -> None:
 
     try:
         if vtt_name:
-            blob_manager = AzureBlobManager(conn_str)
+            blob_manager = AzureBlobManager(config.BlobStorage.CONN_STR)
             vtt_url = blob_manager.get_blob_url("transcription", f"{blob_name}/{vtt_name}")
             body["input"] = {
                 "webvttFile": {
@@ -205,17 +193,16 @@ def polling_iteration(event_body: Dict):
                     message = json.dumps(event_body)
                     event_batch.add(EventData(message))
                     producer.send_batch(event_batch)
+            return
     except Exception as e:
         logging.error(f"Error in video_service, polling_iteration, polling phase: {e}")
         raise
     
-    blob = event_body.get("blob", {})
     lang = event_body.get("lang", {})
 
     translation_id = event_body.get("translation_id")
     iteration_id = event_body.get("iteration_id")
-    conn_str = blob.get("conn_str")
-    origin_video_name = blob.get("blob_name")
+    origin_video_name = event_body.get("blob_name")
     chunk_name = event_body.get("chunk_name")
     mode = event_body.get("mode", "native")
     target_lang = lang.get("target")
@@ -229,7 +216,7 @@ def polling_iteration(event_body: Dict):
         response = requests.get(url, headers=req_header)
         response.raise_for_status()
     except Exception as e:
-        logging.error(f"Error in video_service, polling_iteration: {e}")
+        logging.error(f"Error in video_service, polling_iteration, get translated result phase: {e}")
         raise
 
     if mode == "enhancement":
@@ -257,7 +244,7 @@ def polling_iteration(event_body: Dict):
         tp = TranscriptionParser(target_lang, tt)
         tp.easy_parse(local_file_path)
 
-        blob_manager = AzureBlobManager(conn_str)
+        blob_manager = AzureBlobManager(config.BlobStorage.CONN_STR)
         blob_name = f"{origin_video_name}/{vtt_name}"
         blob_manager.upload_file("transcription", blob_name, local_file_path)
 
@@ -283,12 +270,12 @@ def polling_iteration(event_body: Dict):
                 for chunk in response.iter_content(chunk_size=8192):
                     file.write(chunk)
 
-            blob_manager = AzureBlobManager(conn_str)
+            blob_manager = AzureBlobManager(config.BlobStorage.CONN_STR)
             blob_name = f"{origin_video_name}/{chunk_name}"
             blob_manager.upload_file("translatedchunk", blob_name, local_file_path)
             return True
         except Exception as e:
-            logging.error(f"Error in video_service, polling_iteration: {e}")
+            logging.error(f"Error in video_service, polling_iteration, native mode processing phase: {e}")
             raise
         finally:
             del tdm
@@ -297,9 +284,8 @@ def merge_video(body: Dict):
     tdm = None
     merged_file_path = None
     try:
-        conn_str = body.get("blob").get("conn_str")
-        origin_video_name = body.get("blob").get("blob_name")
-        blob_manager = AzureBlobManager(conn_str)
+        origin_video_name = body.get("blob_name")
+        blob_manager = AzureBlobManager(config.BlobStorage.CONN_STR)
 
         video_cnt = len(blob_manager.list_files_in_folder("translatedchunk", origin_video_name))
         total_cnt = body.get("chunk_num")
@@ -311,8 +297,7 @@ def merge_video(body: Dict):
             blob_manager.download_directory_to_local("translatedchunk", origin_video_name, local_directory_name)
             merged_file_path = ffmpeg.merge_videos_in_directory(local_directory_name)
             
-            target_container_name = body.get("blob").get("target_container_name")
-            blob_manager.upload_file(target_container_name, origin_video_name, merged_file_path)
+            blob_manager.upload_file(config.BlobStorage.TARGET_CONTAINER, origin_video_name, merged_file_path)
     except Exception as e:
         logging.error(f"Error in merge_video: {e}")
         raise

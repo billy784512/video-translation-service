@@ -22,40 +22,41 @@ def video_translation(req: HttpRequest) -> HttpResponse:
                 status_code=400
             )
         
-        video_service.split_video(body)
+        file_num = video_service.split_video(body)
+
 
         return HttpResponse(
-            "Video translation sucessfully initiated.",
+            f"Video translation sucessfully initiated. split into {file_num} jobs",
             status_code=201
         )            
     except requests.RequestException as e:
         logging.error(f"HTTP error: {e}")
         return HttpResponse(
-            "Execution failed.",
+            f"Execution failed. {e}",
             status_code=500
         )
     
 
-@app.route(route="video-split", methods=["POST"], auth_level= AuthLevel.FUNCTION)
-def video_split(req: HttpRequest) -> HttpResponse:
-    try:
-        logging.info("video_split executed")
-        body = req.get_json()
-        logging.info(f"request with body: {body}")
+# @app.route(route="video-split", methods=["POST"], auth_level= AuthLevel.FUNCTION)
+# def video_split(req: HttpRequest) -> HttpResponse:
+#     try:
+#         logging.info("video_split executed")
+#         body = req.get_json()
+#         logging.info(f"request with body: {body}")
 
-        file_num = video_service.split_video(body)
+#         file_num = video_service.split_video(body)
 
-        return HttpResponse(
-            f"Video processed successfully. {file_num} chunks uploaded.",
-            status_code=201
-        )
+#         return HttpResponse(
+#             f"Video processed successfully. {file_num} chunks uploaded.",
+#             status_code=201
+#         )
     
-    except Exception as e:
-        logging.error(f"Error processing video: {e}")
-        return HttpResponse(
-            "An error occurred while processing the video.",
-            status_code=500
-        )
+#     except Exception as e:
+#         logging.error(f"Error processing video: {e}")
+#         return HttpResponse(
+#             "An error occurred while processing the video.",
+#             status_code=500
+#         )
     
 @app.function_name(name="translation")
 @app.event_hub_message_trigger(arg_name="azehub", event_hub_name="translation", connection="EVENT_HUB_CONNECTION_STRING")

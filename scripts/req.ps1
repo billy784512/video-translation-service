@@ -6,18 +6,12 @@ $headers = @{
 }
 
 $body = @{
-    "blob" = @{
-        "conn_str" = ""
-        "source_container_name" = ""
-        "target_container_name" = ""
-        "blob_name" = "" 
-    }
+    "blob_name" = ""
     "lang" = @{
         "source" = "en-US"
         "target" = "zh-TW"
     }
     "chunk_size" = 100
-    "pass_to_eventhub" = "true"
     "mode" = "native"
     "with_subtitle" = "true"
     # "category_id" = "" # optional

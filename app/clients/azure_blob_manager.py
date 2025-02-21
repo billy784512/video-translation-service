@@ -1,6 +1,7 @@
 import os
 import logging
 import datetime
+import threading
 from typing import List
 from concurrent.futures import ThreadPoolExecutor
 
@@ -9,6 +10,7 @@ from azure.storage.blob import BlobServiceClient, generate_blob_sas, BlobSasPerm
 class AzureBlobManager:
     def __init__(self, connection_string: str):
         self.blob_service_client = BlobServiceClient.from_connection_string(connection_string)
+        self.lock = threading.Lock()
     
     def download_blob_to_local(self, container_name: str, blob_name: str, local_file_path: str, num_threads: int = 4) -> None:
         def download_range(range_start, range_end, thread_idx):
@@ -116,6 +118,7 @@ class AzureBlobManager:
         return f"{blob_client.url}?{token}"
 
     def list_files_in_folder(self, container_name: str, directory_name: str, file_type: str = None) -> List[str]:
+        self.__ensure_container_exists(container_name)
         container_client = self.blob_service_client.get_container_client(container_name)
 
         if not directory_name.endswith("/"):
@@ -131,14 +134,15 @@ class AzureBlobManager:
         return result
     
     def __ensure_container_exists(self, container_name: str) -> None:
-        try:
-            container_client = self.blob_service_client.get_container_client(container_name)
-            if not container_client.exists():
-                logging.info(f"Container '{container_name}' does not exist. Creating it...")
-                container_client.create_container()
-                logging.info(f"Container '{container_name}' created successfully.")
-            else:
-                logging.info(f"Container '{container_name}' already exists.")
-        except Exception as e:
-            logging.error(f"Error ensuring container '{container_name}' exists: {e}")
-            raise
+        with self.lock:
+            try:
+                container_client = self.blob_service_client.get_container_client(container_name)
+                if not container_client.exists():
+                    logging.info(f"Container '{container_name}' does not exist. Creating it...")
+                    container_client.create_container()
+                    logging.info(f"Container '{container_name}' created successfully.")
+                else:
+                    logging.info(f"Container '{container_name}' already exists.")
+            except Exception as e:
+                logging.error(f"Error ensuring container '{container_name}' exists: {e}")
+                raise

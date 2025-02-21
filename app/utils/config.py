@@ -17,4 +17,9 @@ class Config:
     class EventHub:
         CONN_STR = os.getenv("EVENT_HUB_CONNECTION_STRING")
 
+    class BlobStorage:
+        CONN_STR = os.getenv("BLOB_STORAGE_CONNECTION_STRING")
+        SOURCE_CONTAINER = os.getenv("BLOB_STORAGE_SOURCE_CONTAINER")
+        TARGET_CONTAINER = os.getenv("BLOB_STORAGE_TARGET_CONTAINER")
+
 config = Config()
